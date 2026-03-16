@@ -1,0 +1,10 @@
+# Cache
+/tmp/claude-pulse-cache.json
+*.cache
+
+# macOS
+.DS_Store
+._*
+
+# Handoff files (temporary work instructions)
+docs/handoff/
