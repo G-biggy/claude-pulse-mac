@@ -20,7 +20,7 @@ Claude Pulse sits in your macOS menu bar and shows your Claude subscription util
 - **Weekly** — 7-day rolling usage across all models with reset countdown
 - **Sonnet** — weekly Sonnet-specific usage with reset countdown
 - **Plan badge** — shows your subscription tier (Free / Pro / Max 5x / Max 20x)
-- **Color-coded** — green `#6ee7b7` under 50%, then yellow / orange / red as usage climbs
+- **Color-coded** — green under 50%, then yellow / orange / red as usage climbs
 - **Auto-refreshing** — updates every 5 minutes, with a 60-second API cache to stay respectful
 - **Refresh Now** — click to force an immediate update from the dropdown
 
