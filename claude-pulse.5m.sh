@@ -194,6 +194,7 @@ fi
 
 TOKEN=$(echo "$CREDS_JSON" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
 SUB_TYPE=$(echo "$CREDS_JSON" | jq -r '.claudeAiOauth.subscriptionType // "unknown"' 2>/dev/null)
+RATE_TIER=$(echo "$CREDS_JSON" | jq -r '.claudeAiOauth.rateLimitTier // ""' 2>/dev/null)
 EXPIRES_AT=$(echo "$CREDS_JSON" | jq -r '.claudeAiOauth.expiresAt // 0' 2>/dev/null)
 
 if [ -z "$TOKEN" ]; then
@@ -332,7 +333,19 @@ printf '%s | color=%s size=13\n' "$MENU_TEXT" "$MENU_COLOR"
 printf '%s\n' "---"
 
 # Header row: CLAUDE PULSE + updated time (like Android header)
-SUB_LABEL=$(echo "$SUB_TYPE" | awk '{print toupper(substr($0,1,1)) tolower(substr($0,2))}')
+# Map plan display name from subscriptionType + rateLimitTier
+case "$RATE_TIER" in
+    *max_20x*) SUB_LABEL="Max 20x" ;;
+    *max_5x*)  SUB_LABEL="Max 5x" ;;
+    *)
+        case "$SUB_TYPE" in
+            pro)  SUB_LABEL="Pro" ;;
+            free) SUB_LABEL="Free" ;;
+            max)  SUB_LABEL="Max" ;;
+            *)    SUB_LABEL="$SUB_TYPE" ;;
+        esac
+    ;;
+esac
 printf 'CLAUDE PULSE · %s | size=12 color=%s\n' "$SUB_LABEL" "$WHITE"
 printf 'Updated %s | size=10 color=%s\n' "$UPDATED" "$FAINT"
 printf '%s\n' "---"
