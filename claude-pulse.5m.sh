@@ -1,9 +1,9 @@
 #!/bin/bash
 # <bitbar.title>Claude Pulse</bitbar.title>
-# <bitbar.version>v1.1</bitbar.version>
+# <bitbar.version>v1.2</bitbar.version>
 # <bitbar.author>G + Sage + Forge</bitbar.author>
 # <bitbar.author.github>ghayyath</bitbar.author.github>
-# <bitbar.desc>Shows Claude subscription usage (5h + 7d) in menu bar</bitbar.desc>
+# <bitbar.desc>Shows Claude subscription usage (Session + Weekly + Sonnet) in menu bar</bitbar.desc>
 # <bitbar.dependencies>jq</bitbar.dependencies>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>
@@ -19,7 +19,7 @@ REFRESH_URL="https://console.anthropic.com/v1/oauth/token"
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
 # ─── Color Thresholds ────────────────────────────────────────────
-GREEN="#4CAF50"
+GREEN="#6ee7b7"
 YELLOW="#FF9800"
 ORANGE="#FF5722"
 RED="#F44336"
@@ -292,15 +292,19 @@ FIVE_H_PCT=$(echo "$USAGE_JSON" | jq -r '.five_hour.utilization // 0' 2>/dev/nul
 FIVE_H_RESET=$(echo "$USAGE_JSON" | jq -r '.five_hour.resets_at // null' 2>/dev/null)
 SEVEN_D_PCT=$(echo "$USAGE_JSON" | jq -r '.seven_day.utilization // 0' 2>/dev/null)
 SEVEN_D_RESET=$(echo "$USAGE_JSON" | jq -r '.seven_day.resets_at // null' 2>/dev/null)
+SONNET_PCT=$(echo "$USAGE_JSON" | jq -r '.seven_day_sonnet.utilization // 0' 2>/dev/null)
+SONNET_RESET=$(echo "$USAGE_JSON" | jq -r '.seven_day_sonnet.resets_at // null' 2>/dev/null)
 
 # Round to integers for display
 FIVE_H_PCT=$(printf "%.0f" "$FIVE_H_PCT" 2>/dev/null || echo "0")
 SEVEN_D_PCT=$(printf "%.0f" "$SEVEN_D_PCT" 2>/dev/null || echo "0")
+SONNET_PCT=$(printf "%.0f" "$SONNET_PCT" 2>/dev/null || echo "0")
 
 # ─── Generate Output ─────────────────────────────────────────────
 
 FIVE_H_COLOR=$(get_color "$FIVE_H_PCT")
 SEVEN_D_COLOR=$(get_color "$SEVEN_D_PCT")
+SONNET_COLOR=$(get_color "$SONNET_PCT")
 
 # Menu bar line — show 5h as primary, add 7d if also high
 MENU_COLOR="$FIVE_H_COLOR"
@@ -316,10 +320,12 @@ fi
 # Calculate remaining times
 FIVE_H_REMAINING=$(time_remaining "$FIVE_H_RESET")
 SEVEN_D_REMAINING=$(time_remaining "$SEVEN_D_RESET")
+SONNET_REMAINING=$(time_remaining "$SONNET_RESET")
 
 # Progress bars
 FIVE_H_BAR=$(make_bar "$FIVE_H_PCT")
 SEVEN_D_BAR=$(make_bar "$SEVEN_D_PCT")
+SONNET_BAR=$(make_bar "$SONNET_PCT")
 
 # ─── Render ──────────────────────────────────────────────────────
 
@@ -329,8 +335,8 @@ printf '%s | color=%s size=13\n' "$MENU_TEXT" "$MENU_COLOR"
 # Dropdown
 printf '%s\n' "---"
 
-# 5-hour window
-printf "5-Hour Window | size=12 color=%s\n" "$DIMGRAY"
+# Session (5-hour window)
+printf "Session | size=12 color=%s\n" "$DIMGRAY"
 printf "%s %s%% | font=Menlo size=11 color=%s\n" "$FIVE_H_BAR" "$FIVE_H_PCT" "$FIVE_H_COLOR"
 if [ "$FIVE_H_RESET" != "null" ] && [ -n "$FIVE_H_RESET" ]; then
     printf "Resets in %s | size=11 color=%s\n" "$FIVE_H_REMAINING" "$GRAY"
@@ -340,11 +346,22 @@ fi
 
 printf '%s\n' "---"
 
-# 7-day window
-printf "Weekly (7-Day) | size=12 color=%s\n" "$DIMGRAY"
+# Weekly (7-day all models)
+printf "Weekly | size=12 color=%s\n" "$DIMGRAY"
 printf "%s %s%% | font=Menlo size=11 color=%s\n" "$SEVEN_D_BAR" "$SEVEN_D_PCT" "$SEVEN_D_COLOR"
 if [ "$SEVEN_D_RESET" != "null" ] && [ -n "$SEVEN_D_RESET" ]; then
     printf "Resets in %s | size=11 color=%s\n" "$SEVEN_D_REMAINING" "$GRAY"
+else
+    printf "No active limit | size=11 color=%s\n" "$GRAY"
+fi
+
+printf '%s\n' "---"
+
+# Sonnet (7-day Sonnet)
+printf "Sonnet | size=12 color=%s\n" "$DIMGRAY"
+printf "%s %s%% | font=Menlo size=11 color=%s\n" "$SONNET_BAR" "$SONNET_PCT" "$SONNET_COLOR"
+if [ "$SONNET_RESET" != "null" ] && [ -n "$SONNET_RESET" ]; then
+    printf "Resets in %s | size=11 color=%s\n" "$SONNET_REMAINING" "$GRAY"
 else
     printf "No active limit | size=11 color=%s\n" "$GRAY"
 fi
