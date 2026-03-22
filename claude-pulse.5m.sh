@@ -1,6 +1,6 @@
 #!/bin/bash
 # <bitbar.title>Claude Pulse</bitbar.title>
-# <bitbar.version>v1.0</bitbar.version>
+# <bitbar.version>v1.1</bitbar.version>
 # <bitbar.author>G + Sage + Forge</bitbar.author>
 # <bitbar.author.github>ghayyath</bitbar.author.github>
 # <bitbar.desc>Shows Claude subscription usage (5h + 7d) in menu bar</bitbar.desc>
@@ -8,15 +8,17 @@
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>
 
-# ─── Config ───────────────────────────────────────────────────────────
+# ─── Config ───────────────────────────────────────────────────────
 CACHE_FILE="/tmp/claude-pulse-cache.json"
 CACHE_MAX_AGE=60  # seconds — don't hit API more than once per minute
 API_URL="https://api.anthropic.com/api/oauth/usage"
 API_BETA="oauth-2025-04-20"
 KEYCHAIN_SERVICE="Claude Code-credentials"
 CREDS_FILE="$HOME/.claude/.credentials.json"
+REFRESH_URL="https://console.anthropic.com/v1/oauth/token"
+CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-# ─── Color Thresholds ────────────────────────────────────────────────
+# ─── Color Thresholds ────────────────────────────────────────────
 GREEN="#4CAF50"
 YELLOW="#FF9800"
 ORANGE="#FF5722"
@@ -24,7 +26,7 @@ RED="#F44336"
 GRAY="#888888"
 DIMGRAY="#666666"
 
-# ─── Helpers ──────────────────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────
 
 get_color() {
     local pct=$1
@@ -113,13 +115,74 @@ error_state() {
     exit 0
 }
 
-# ─── Check Dependencies ──────────────────────────────────────────────
+# ─── Auto-Refresh OAuth Token ────────────────────────────────────
+# Uses the refresh token to get a fresh access token from Anthropic.
+# Updates Keychain so the new token persists across runs.
+# Returns 0 on success (TOKEN is updated), 1 on failure.
+
+auto_refresh_token() {
+    local refresh_token
+    refresh_token=$(echo "$CREDS_JSON" | jq -r '.claudeAiOauth.refreshToken // empty' 2>/dev/null)
+
+    if [ -z "$refresh_token" ]; then
+        return 1
+    fi
+
+    # Call the refresh endpoint
+    local refresh_response
+    refresh_response=$(curl -sL --max-time 15 -X POST "$REFRESH_URL" \
+        -H "Content-Type: application/json" \
+        -d "$(printf '{"grant_type":"refresh_token","refresh_token":"%s","client_id":"%s"}' "$refresh_token" "$CLIENT_ID")" \
+        2>/dev/null)
+
+    # Check for valid response
+    local new_access
+    new_access=$(echo "$refresh_response" | jq -r '.access_token // empty' 2>/dev/null)
+
+    if [ -z "$new_access" ]; then
+        return 1
+    fi
+
+    local new_refresh
+    new_refresh=$(echo "$refresh_response" | jq -r '.refresh_token // empty' 2>/dev/null)
+    local expires_in
+    expires_in=$(echo "$refresh_response" | jq -r '.expires_in // 28800' 2>/dev/null)
+
+    # Calculate new expiresAt in milliseconds
+    local new_expires_at
+    new_expires_at=$(( ($(date +%s) + expires_in) * 1000 ))
+
+    # Update CREDS_JSON with new tokens
+    CREDS_JSON=$(echo "$CREDS_JSON" | jq \
+        --arg at "$new_access" \
+        --arg rt "${new_refresh:-$refresh_token}" \
+        --argjson ea "$new_expires_at" \
+        '.claudeAiOauth.accessToken = $at | .claudeAiOauth.refreshToken = $rt | .claudeAiOauth.expiresAt = $ea' \
+        2>/dev/null)
+
+    # Write back to Keychain
+    security delete-generic-password -s "$KEYCHAIN_SERVICE" 2>/dev/null
+    security add-generic-password -s "$KEYCHAIN_SERVICE" -a "$USER" -w "$CREDS_JSON" 2>/dev/null
+
+    # Also update credentials file if it exists
+    if [ -f "$CREDS_FILE" ]; then
+        echo "$CREDS_JSON" > "$CREDS_FILE" 2>/dev/null
+    fi
+
+    # Update the live TOKEN variable
+    TOKEN="$new_access"
+    EXPIRES_AT="$new_expires_at"
+
+    return 0
+}
+
+# ─── Check Dependencies ──────────────────────────────────────────
 
 if ! command -v jq &>/dev/null; then
     error_state "jq not installed" "Run: brew install jq"
 fi
 
-# ─── Get OAuth Token ──────────────────────────────────────────────────
+# ─── Get OAuth Token ─────────────────────────────────────────────
 
 TOKEN=""
 SUB_TYPE=""
@@ -147,12 +210,16 @@ if [ -z "$TOKEN" ]; then
 fi
 
 # Check token expiry (expiresAt is in milliseconds)
+# If expired, try auto-refresh before giving up
 NOW_MS=$(( $(date +%s) * 1000 ))
 if [ "$EXPIRES_AT" -gt 0 ] 2>/dev/null && [ "$EXPIRES_AT" -lt "$NOW_MS" ] 2>/dev/null; then
-    error_state "Token expired" "Run 'claude login' to refresh"
+    if ! auto_refresh_token; then
+        error_state "Token expired" "Run 'claude login' to refresh"
+    fi
+    # TOKEN is now updated by auto_refresh_token
 fi
 
-# ─── Fetch Usage Data (with cache) ───────────────────────────────────
+# ─── Fetch Usage Data (with cache) ───────────────────────────────
 
 USE_CACHE=false
 USAGE_JSON=""
@@ -174,16 +241,35 @@ if [ "$USE_CACHE" = false ]; then
         -H "Accept: application/json" \
         2>/dev/null)
 
-    # Check for API error
+    # Check for auth error — might need token refresh even if expiresAt wasn't reached
     if echo "$USAGE_JSON" | jq -e '.error' &>/dev/null; then
-        ERROR_MSG=$(echo "$USAGE_JSON" | jq -r '.error.message // "Unknown API error"' 2>/dev/null)
-        # Try cached data
-        if [ -f "$CACHE_FILE" ]; then
-            USAGE_JSON=$(cat "$CACHE_FILE")
-            CACHE_AGE=$(( $(date +%s) - $(stat -f "%m" "$CACHE_FILE" 2>/dev/null || echo 0) ))
-            USE_CACHE=true
+        ERROR_TYPE=$(echo "$USAGE_JSON" | jq -r '.error.type // ""' 2>/dev/null)
+        if [ "$ERROR_TYPE" = "authentication_error" ]; then
+            # Token rejected by API — try refresh
+            if auto_refresh_token; then
+                # Retry the API call with fresh token
+                USAGE_JSON=$(curl -s --max-time 10 "$API_URL" \
+                    -H "Authorization: Bearer $TOKEN" \
+                    -H "anthropic-beta: $API_BETA" \
+                    -H "Content-Type: application/json" \
+                    -H "Accept: application/json" \
+                    2>/dev/null)
+            fi
+        fi
+
+        # Still an error after refresh attempt? Fall back to cache
+        if echo "$USAGE_JSON" | jq -e '.error' &>/dev/null; then
+            ERROR_MSG=$(echo "$USAGE_JSON" | jq -r '.error.message // "Unknown API error"' 2>/dev/null)
+            if [ -f "$CACHE_FILE" ]; then
+                USAGE_JSON=$(cat "$CACHE_FILE")
+                CACHE_AGE=$(( $(date +%s) - $(stat -f "%m" "$CACHE_FILE" 2>/dev/null || echo 0) ))
+                USE_CACHE=true
+            else
+                error_state "API Error" "$ERROR_MSG"
+            fi
         else
-            error_state "API Error" "$ERROR_MSG"
+            # Refresh worked, cache the fresh response
+            echo "$USAGE_JSON" > "$CACHE_FILE"
         fi
     elif [ -z "$USAGE_JSON" ] || ! echo "$USAGE_JSON" | jq -e '.' &>/dev/null; then
         # Invalid response — try cache
@@ -200,7 +286,7 @@ if [ "$USE_CACHE" = false ]; then
     fi
 fi
 
-# ─── Parse Usage Data ─────────────────────────────────────────────────
+# ─── Parse Usage Data ────────────────────────────────────────────
 
 FIVE_H_PCT=$(echo "$USAGE_JSON" | jq -r '.five_hour.utilization // 0' 2>/dev/null)
 FIVE_H_RESET=$(echo "$USAGE_JSON" | jq -r '.five_hour.resets_at // null' 2>/dev/null)
@@ -211,7 +297,7 @@ SEVEN_D_RESET=$(echo "$USAGE_JSON" | jq -r '.seven_day.resets_at // null' 2>/dev
 FIVE_H_PCT=$(printf "%.0f" "$FIVE_H_PCT" 2>/dev/null || echo "0")
 SEVEN_D_PCT=$(printf "%.0f" "$SEVEN_D_PCT" 2>/dev/null || echo "0")
 
-# ─── Generate Output ──────────────────────────────────────────────────
+# ─── Generate Output ─────────────────────────────────────────────
 
 FIVE_H_COLOR=$(get_color "$FIVE_H_PCT")
 SEVEN_D_COLOR=$(get_color "$SEVEN_D_PCT")
@@ -235,7 +321,7 @@ SEVEN_D_REMAINING=$(time_remaining "$SEVEN_D_RESET")
 FIVE_H_BAR=$(make_bar "$FIVE_H_PCT")
 SEVEN_D_BAR=$(make_bar "$SEVEN_D_PCT")
 
-# ─── Render ───────────────────────────────────────────────────────────
+# ─── Render ──────────────────────────────────────────────────────
 
 # Menu bar
 printf '%s | color=%s size=13\n' "$MENU_TEXT" "$MENU_COLOR"
