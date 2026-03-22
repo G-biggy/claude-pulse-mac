@@ -47,6 +47,10 @@ make_bar() {
     local pct=$1
     local width=15
     local filled=$(( pct * width / 100 ))
+    # Ensure at least 1 filled block when usage > 0
+    if [ "$pct" -gt 0 ] 2>/dev/null && [ "$filled" -eq 0 ]; then
+        filled=1
+    fi
     local empty=$(( width - filled ))
     local bar=""
     for ((i=0; i<filled; i++)); do bar+="█"; done
