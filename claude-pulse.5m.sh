@@ -1,6 +1,6 @@
 #!/bin/bash
 # <bitbar.title>Claude Pulse</bitbar.title>
-# <bitbar.version>v1.3</bitbar.version>
+# <bitbar.version>v1.5</bitbar.version>
 # <bitbar.author>G + Sage + Forge</bitbar.author>
 # <bitbar.author.github>ghayyath</bitbar.author.github>
 # <bitbar.desc>Shows Claude subscription usage (Session + Weekly + Sonnet) in menu bar</bitbar.desc>
@@ -134,6 +134,13 @@ auto_refresh_token() {
         -d "$(printf '{"grant_type":"refresh_token","refresh_token":"%s","client_id":"%s"}' "$refresh_token" "$CLIENT_ID")" \
         2>/dev/null)
 
+    # Check for rate limit on refresh endpoint
+    local refresh_error_type
+    refresh_error_type=$(echo "$refresh_response" | jq -r '.error.type // empty' 2>/dev/null)
+    if [ "$refresh_error_type" = "rate_limit_error" ]; then
+        return 2  # Return 2 for rate limit (vs 1 for real failure)
+    fi
+
     local new_access
     new_access=$(echo "$refresh_response" | jq -r '.access_token // empty' 2>/dev/null)
 
@@ -203,22 +210,41 @@ fi
 
 NOW_MS=$(( $(date +%s) * 1000 ))
 if [ "$EXPIRES_AT" -gt 0 ] 2>/dev/null && [ "$EXPIRES_AT" -lt "$NOW_MS" ] 2>/dev/null; then
-    if ! auto_refresh_token; then
+    auto_refresh_token
+    REFRESH_RESULT=$?
+    if [ "$REFRESH_RESULT" -eq 1 ]; then
+        # Real auth failure — no rate limit, token is truly dead
         error_state "Token expired" "Log into Claude Code to refresh"
+    elif [ "$REFRESH_RESULT" -eq 2 ]; then
+        # Rate limited — token might be fine, try with expired token or use cache
+        if [ -f "$CACHE_FILE" ]; then
+            USAGE_JSON=$(cat "$CACHE_FILE" 2>/dev/null)
+            CACHE_AGE=$(( $(date +%s) - $(stat -f "%m" "$CACHE_FILE" 2>/dev/null || echo 0) ))
+            USE_CACHE=true
+        fi
+        # Don't error_state — fall through to render with cache
     fi
 fi
 
 # ─── Fetch Usage Data (with cache) ───────────────────────────────
 
-USE_CACHE=false
-USAGE_JSON=""
-CACHE_AGE=0
+if [ -z "$USE_CACHE" ]; then
+    USE_CACHE=false
+fi
+if [ -z "$USAGE_JSON" ]; then
+    USAGE_JSON=""
+fi
+if [ -z "$CACHE_AGE" ]; then
+    CACHE_AGE=0
+fi
 
-if [ -f "$CACHE_FILE" ]; then
-    CACHE_AGE=$(( $(date +%s) - $(stat -f "%m" "$CACHE_FILE" 2>/dev/null || echo 0) ))
-    if [ "$CACHE_AGE" -lt "$CACHE_MAX_AGE" ]; then
-        USAGE_JSON=$(cat "$CACHE_FILE" 2>/dev/null)
-        USE_CACHE=true
+if [ "$USE_CACHE" = false ]; then
+    if [ -f "$CACHE_FILE" ]; then
+        CACHE_AGE=$(( $(date +%s) - $(stat -f "%m" "$CACHE_FILE" 2>/dev/null || echo 0) ))
+        if [ "$CACHE_AGE" -lt "$CACHE_MAX_AGE" ]; then
+            USAGE_JSON=$(cat "$CACHE_FILE" 2>/dev/null)
+            USE_CACHE=true
+        fi
     fi
 fi
 
@@ -232,7 +258,17 @@ if [ "$USE_CACHE" = false ]; then
 
     if echo "$USAGE_JSON" | jq -e '.error' &>/dev/null; then
         ERROR_TYPE=$(echo "$USAGE_JSON" | jq -r '.error.type // ""' 2>/dev/null)
-        if [ "$ERROR_TYPE" = "authentication_error" ]; then
+
+        # Rate limit — not an auth problem, fall back to cache
+        if [ "$ERROR_TYPE" = "rate_limit_error" ]; then
+            if [ -f "$CACHE_FILE" ]; then
+                USAGE_JSON=$(cat "$CACHE_FILE")
+                CACHE_AGE=$(( $(date +%s) - $(stat -f "%m" "$CACHE_FILE" 2>/dev/null || echo 0) ))
+                USE_CACHE=true
+            else
+                error_state "Rate limited" "Try again in a few minutes"
+            fi
+        elif [ "$ERROR_TYPE" = "authentication_error" ]; then
             if auto_refresh_token; then
                 USAGE_JSON=$(curl -s --max-time 10 "$API_URL" \
                     -H "Authorization: Bearer $TOKEN" \
@@ -243,6 +279,7 @@ if [ "$USE_CACHE" = false ]; then
             fi
         fi
 
+        # Still have an error after handling? Fall back to cache or error out
         if echo "$USAGE_JSON" | jq -e '.error' &>/dev/null; then
             ERROR_MSG=$(echo "$USAGE_JSON" | jq -r '.error.message // "Unknown API error"' 2>/dev/null)
             if [ -f "$CACHE_FILE" ]; then
