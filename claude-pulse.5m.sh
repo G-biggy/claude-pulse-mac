@@ -204,7 +204,7 @@ fi
 NOW_MS=$(( $(date +%s) * 1000 ))
 if [ "$EXPIRES_AT" -gt 0 ] 2>/dev/null && [ "$EXPIRES_AT" -lt "$NOW_MS" ] 2>/dev/null; then
     if ! auto_refresh_token; then
-        error_state "Token expired" "Run 'claude login' to refresh"
+        error_state "Token expired" "Log into Claude Code to refresh"
     fi
 fi
 
