@@ -1,9 +1,9 @@
 #!/bin/bash
 # <bitbar.title>Claude Pulse</bitbar.title>
-# <bitbar.version>v1.5</bitbar.version>
+# <bitbar.version>v1.6</bitbar.version>
 # <bitbar.author>G + Sage + Forge</bitbar.author>
 # <bitbar.author.github>ghayyath</bitbar.author.github>
-# <bitbar.desc>Shows Claude subscription usage (Session + Weekly + Sonnet) in menu bar</bitbar.desc>
+# <bitbar.desc>Shows Claude subscription usage (Session, Weekly, and per-model limits like Fable) in menu bar</bitbar.desc>
 # <bitbar.dependencies>jq</bitbar.dependencies>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>
@@ -306,49 +306,76 @@ if [ "$USE_CACHE" = false ]; then
 fi
 
 # ─── Parse Usage Data ────────────────────────────────────────────
+# Prefer the generic `limits` array (session, weekly, and per-model scoped
+# limits like Fable). Fall back to the legacy five_hour/seven_day fields.
+# Output: one TSV row per limit → label, percent, resets_at
 
-FIVE_H_PCT=$(echo "$USAGE_JSON" | jq -r '.five_hour.utilization // 0' 2>/dev/null)
-FIVE_H_RESET=$(echo "$USAGE_JSON" | jq -r '.five_hour.resets_at // null' 2>/dev/null)
-SEVEN_D_PCT=$(echo "$USAGE_JSON" | jq -r '.seven_day.utilization // 0' 2>/dev/null)
-SEVEN_D_RESET=$(echo "$USAGE_JSON" | jq -r '.seven_day.resets_at // null' 2>/dev/null)
-SONNET_PCT=$(echo "$USAGE_JSON" | jq -r '.seven_day_sonnet.utilization // 0' 2>/dev/null)
-SONNET_RESET=$(echo "$USAGE_JSON" | jq -r '.seven_day_sonnet.resets_at // null' 2>/dev/null)
+LIMIT_ROWS=$(echo "$USAGE_JSON" | jq -r '
+    if (.limits | type) == "array" and (.limits | length) > 0 then
+        .limits[] | [
+            (if .kind == "session" then "Session"
+             elif .kind == "weekly_all" then "Weekly"
+             else (.scope.model.display_name // .scope.surface.display_name // .kind) end),
+            (.percent // 0 | round),
+            (.resets_at // "null")
+        ]
+    else
+        ([ "Session", .five_hour.utilization, .five_hour.resets_at ],
+         [ "Weekly", .seven_day.utilization, .seven_day.resets_at ],
+         (if .seven_day_sonnet then [ "Sonnet", .seven_day_sonnet.utilization, .seven_day_sonnet.resets_at ] else empty end))
+        | [ .[0], (.[1] // 0 | round), (.[2] // "null") ]
+    end | @tsv' 2>/dev/null)
 
-FIVE_H_PCT=$(printf "%.0f" "$FIVE_H_PCT" 2>/dev/null || echo "0")
-SEVEN_D_PCT=$(printf "%.0f" "$SEVEN_D_PCT" 2>/dev/null || echo "0")
-SONNET_PCT=$(printf "%.0f" "$SONNET_PCT" 2>/dev/null || echo "0")
+if [ -z "$LIMIT_ROWS" ]; then
+    error_state "Unexpected API response" "No usage limits found"
+fi
+
+# Reset label: "2h 56m · 11:29 AM" (same day) or "1d 13h · Sun 10:59 PM"
+reset_label() {
+    local reset_ts="$1"
+    local remaining
+    remaining=$(time_remaining "$reset_ts")
+    [ -z "$remaining" ] && return
+    local epoch
+    epoch=$(python3 -c "
+from datetime import datetime
+try: print(int(datetime.fromisoformat('$reset_ts'.replace('Z', '+00:00')).timestamp()))
+except: print(0)
+" 2>/dev/null)
+    if [ -z "$epoch" ] || [ "$epoch" = "0" ] || [ "$remaining" = "now" ]; then
+        echo "$remaining"
+        return
+    fi
+    local clock
+    if [ "$(date -r "$epoch" +%F)" = "$(date +%F)" ]; then
+        clock=$(date -r "$epoch" "+%-I:%M %p")
+    else
+        clock=$(date -r "$epoch" "+%a %-I:%M %p")
+    fi
+    echo "$remaining · $clock"
+}
 
 # ─── Build Display ───────────────────────────────────────────────
 
-FIVE_H_COLOR=$(get_color "$FIVE_H_PCT")
-SEVEN_D_COLOR=$(get_color "$SEVEN_D_PCT")
-SONNET_COLOR=$(get_color "$SONNET_PCT")
+# Menu bar: session % as primary; append the worst other limit if ≥75%
+SESSION_PCT=0
+WORST_OTHER=0
+while IFS=$'\t' read -r label pct reset; do
+    if [ "$label" = "Session" ]; then
+        SESSION_PCT=$pct
+    elif [ "$pct" -gt "$WORST_OTHER" ] 2>/dev/null; then
+        WORST_OTHER=$pct
+    fi
+done <<< "$LIMIT_ROWS"
 
-# Menu bar — show 5h as primary, escalate color if weekly is worse
-MENU_COLOR="$FIVE_H_COLOR"
-if [ "$SEVEN_D_PCT" -ge 75 ] 2>/dev/null && [ "$FIVE_H_PCT" -lt 75 ] 2>/dev/null; then
-    MENU_COLOR="$SEVEN_D_COLOR"
+MENU_COLOR=$(get_color "$SESSION_PCT")
+MENU_TEXT="◉ ${SESSION_PCT}%"
+if [ "$WORST_OTHER" -ge 75 ] 2>/dev/null; then
+    MENU_TEXT="◉ ${SESSION_PCT}%·${WORST_OTHER}%"
+    if [ "$SESSION_PCT" -lt "$WORST_OTHER" ]; then
+        MENU_COLOR=$(get_color "$WORST_OTHER")
+    fi
 fi
-
-MENU_TEXT="◉ ${FIVE_H_PCT}%"
-if [ "$SEVEN_D_PCT" -ge 75 ] 2>/dev/null; then
-    MENU_TEXT="◉ ${FIVE_H_PCT}%·${SEVEN_D_PCT}%"
-fi
-
-# Remaining times
-FIVE_H_REMAINING=$(time_remaining "$FIVE_H_RESET")
-SEVEN_D_REMAINING=$(time_remaining "$SEVEN_D_RESET")
-SONNET_REMAINING=$(time_remaining "$SONNET_RESET")
-
-# Progress bars
-FIVE_H_BAR=$(make_bar "$FIVE_H_PCT")
-SEVEN_D_BAR=$(make_bar "$SEVEN_D_PCT")
-SONNET_BAR=$(make_bar "$SONNET_PCT")
-
-# Format percentages right-aligned (pad to 3 chars)
-FIVE_H_LABEL=$(printf "%3s%%" "$FIVE_H_PCT")
-SEVEN_D_LABEL=$(printf "%3s%%" "$SEVEN_D_PCT")
-SONNET_LABEL=$(printf "%3s%%" "$SONNET_PCT")
 
 # Updated timestamp
 if [ "$USE_CACHE" = true ] && [ "$CACHE_AGE" -gt 0 ]; then
@@ -385,35 +412,20 @@ case "$RATE_TIER" in
 esac
 printf 'CLAUDE PULSE · %s | size=12 color=%s\n' "$SUB_LABEL" "$WHITE"
 printf 'Updated %s | size=10 color=%s\n' "$UPDATED" "$FAINT"
-printf '%s\n' "---"
 
-# Session row: label + bar + percentage
-printf 'Session  %s  %s | font=Menlo size=12 color=%s trim=false\n' "$FIVE_H_BAR" "$FIVE_H_LABEL" "$FIVE_H_COLOR"
-if [ -n "$FIVE_H_REMAINING" ]; then
-    printf '         Resets in %s | font=Menlo size=10 color=%s trim=false\n' "$FIVE_H_REMAINING" "$DIM"
-else
-    printf '         No active window | font=Menlo size=10 color=%s trim=false\n' "$DIM"
-fi
-
-printf '%s\n' "---"
-
-# Weekly row
-printf 'Weekly   %s  %s | font=Menlo size=12 color=%s trim=false\n' "$SEVEN_D_BAR" "$SEVEN_D_LABEL" "$SEVEN_D_COLOR"
-if [ -n "$SEVEN_D_REMAINING" ]; then
-    printf '         Resets in %s | font=Menlo size=10 color=%s trim=false\n' "$SEVEN_D_REMAINING" "$DIM"
-else
-    printf '         No active limit | font=Menlo size=10 color=%s trim=false\n' "$DIM"
-fi
-
-printf '%s\n' "---"
-
-# Sonnet row
-printf 'Sonnet   %s  %s | font=Menlo size=12 color=%s trim=false\n' "$SONNET_BAR" "$SONNET_LABEL" "$SONNET_COLOR"
-if [ -n "$SONNET_REMAINING" ]; then
-    printf '         Resets in %s | font=Menlo size=10 color=%s trim=false\n' "$SONNET_REMAINING" "$DIM"
-else
-    printf '         No active limit | font=Menlo size=10 color=%s trim=false\n' "$DIM"
-fi
+# One row per limit: label + bar + percentage, then reset line
+while IFS=$'\t' read -r label pct reset; do
+    printf '%s\n' "---"
+    color=$(get_color "$pct")
+    printf '%-8.8s %s  %s | font=Menlo size=12 color=%s trim=false\n' \
+        "$label" "$(make_bar "$pct")" "$(printf "%3s%%" "$pct")" "$color"
+    when=$(reset_label "$reset")
+    if [ -n "$when" ]; then
+        printf '         Resets in %s | font=Menlo size=10 color=%s trim=false\n' "$when" "$DIM"
+    else
+        printf '         No active window | font=Menlo size=10 color=%s trim=false\n' "$DIM"
+    fi
+done <<< "$LIMIT_ROWS"
 
 printf '%s\n' "---"
 printf 'Refresh Now | refresh=true\n'

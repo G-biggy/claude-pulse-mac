@@ -18,7 +18,7 @@ Claude Pulse sits in your macOS menu bar and shows your Claude subscription util
 
 - **Session** — your current 5-hour session utilization with reset countdown
 - **Weekly** — 7-day rolling usage across all models with reset countdown
-- **Sonnet** — weekly Sonnet-specific usage with reset countdown
+- **Per-model limits** (e.g. Fable) — picked up automatically from the API, with reset countdown + local reset time
 - **Plan badge** — shows your subscription tier (Free / Pro / Max 5x / Max 20x)
 - **Color-coded** — green under 50%, then yellow / orange / red as usage climbs
 - **Auto-refreshing** — updates every 5 minutes, with a 60-second API cache to stay respectful
