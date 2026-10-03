@@ -1,6 +1,6 @@
 #!/bin/bash
 # <bitbar.title>Claude Pulse</bitbar.title>
-# <bitbar.version>v1.6</bitbar.version>
+# <bitbar.version>v1.7</bitbar.version>
 # <bitbar.author>G + Sage + Forge</bitbar.author>
 # <bitbar.author.github>ghayyath</bitbar.author.github>
 # <bitbar.desc>Shows Claude subscription usage (Session, Weekly, and per-model limits like Fable) in menu bar</bitbar.desc>
@@ -15,8 +15,8 @@ API_URL="https://api.anthropic.com/api/oauth/usage"
 API_BETA="oauth-2025-04-20"
 KEYCHAIN_SERVICE="Claude Code-credentials"
 CREDS_FILE="$HOME/.claude/.credentials.json"
-REFRESH_URL="https://console.anthropic.com/v1/oauth/token"
-CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Read-only: Claude Code owns its login. This script never refreshes the
+# token or writes to the Keychain; a stale token means "open Claude Code".
 
 # ─── Colors (matches Android widget) ─────────────────────────────
 BRAND="#6ee7b7"      # Brand green — bars + percentages
@@ -118,64 +118,6 @@ error_state() {
     exit 0
 }
 
-# ─── Auto-Refresh OAuth Token ────────────────────────────────────
-
-auto_refresh_token() {
-    local refresh_token
-    refresh_token=$(echo "$CREDS_JSON" | jq -r '.claudeAiOauth.refreshToken // empty' 2>/dev/null)
-
-    if [ -z "$refresh_token" ]; then
-        return 1
-    fi
-
-    local refresh_response
-    refresh_response=$(curl -sL --max-time 15 -X POST "$REFRESH_URL" \
-        -H "Content-Type: application/json" \
-        -d "$(printf '{"grant_type":"refresh_token","refresh_token":"%s","client_id":"%s"}' "$refresh_token" "$CLIENT_ID")" \
-        2>/dev/null)
-
-    # Check for rate limit on refresh endpoint
-    local refresh_error_type
-    refresh_error_type=$(echo "$refresh_response" | jq -r '.error.type // empty' 2>/dev/null)
-    if [ "$refresh_error_type" = "rate_limit_error" ]; then
-        return 2  # Return 2 for rate limit (vs 1 for real failure)
-    fi
-
-    local new_access
-    new_access=$(echo "$refresh_response" | jq -r '.access_token // empty' 2>/dev/null)
-
-    if [ -z "$new_access" ]; then
-        return 1
-    fi
-
-    local new_refresh
-    new_refresh=$(echo "$refresh_response" | jq -r '.refresh_token // empty' 2>/dev/null)
-    local expires_in
-    expires_in=$(echo "$refresh_response" | jq -r '.expires_in // 28800' 2>/dev/null)
-
-    local new_expires_at
-    new_expires_at=$(( ($(date +%s) + expires_in) * 1000 ))
-
-    CREDS_JSON=$(echo "$CREDS_JSON" | jq \
-        --arg at "$new_access" \
-        --arg rt "${new_refresh:-$refresh_token}" \
-        --argjson ea "$new_expires_at" \
-        '.claudeAiOauth.accessToken = $at | .claudeAiOauth.refreshToken = $rt | .claudeAiOauth.expiresAt = $ea' \
-        2>/dev/null)
-
-    security delete-generic-password -s "$KEYCHAIN_SERVICE" 2>/dev/null
-    security add-generic-password -s "$KEYCHAIN_SERVICE" -a "$USER" -w "$CREDS_JSON" 2>/dev/null
-
-    if [ -f "$CREDS_FILE" ]; then
-        echo "$CREDS_JSON" > "$CREDS_FILE" 2>/dev/null
-    fi
-
-    TOKEN="$new_access"
-    EXPIRES_AT="$new_expires_at"
-
-    return 0
-}
-
 # ─── Check Dependencies ──────────────────────────────────────────
 
 if ! command -v jq &>/dev/null; then
@@ -208,21 +150,18 @@ if [ -z "$TOKEN" ]; then
     error_state "Invalid credentials" "OAuth token not found in Keychain"
 fi
 
+TOKEN_STALE=false
 NOW_MS=$(( $(date +%s) * 1000 ))
 if [ "$EXPIRES_AT" -gt 0 ] 2>/dev/null && [ "$EXPIRES_AT" -lt "$NOW_MS" ] 2>/dev/null; then
-    auto_refresh_token
-    REFRESH_RESULT=$?
-    if [ "$REFRESH_RESULT" -eq 1 ]; then
-        # Real auth failure — no rate limit, token is truly dead
-        error_state "Token expired" "Log into Claude Code to refresh"
-    elif [ "$REFRESH_RESULT" -eq 2 ]; then
-        # Rate limited — token might be fine, try with expired token or use cache
-        if [ -f "$CACHE_FILE" ]; then
-            USAGE_JSON=$(cat "$CACHE_FILE" 2>/dev/null)
-            CACHE_AGE=$(( $(date +%s) - $(stat -f "%m" "$CACHE_FILE" 2>/dev/null || echo 0) ))
-            USE_CACHE=true
-        fi
-        # Don't error_state — fall through to render with cache
+    # Expired token: Claude Code refreshes it next time it runs. Show the
+    # last known numbers meanwhile instead of touching its login.
+    TOKEN_STALE=true
+    if [ -f "$CACHE_FILE" ]; then
+        USAGE_JSON=$(cat "$CACHE_FILE" 2>/dev/null)
+        CACHE_AGE=$(( $(date +%s) - $(stat -f "%m" "$CACHE_FILE" 2>/dev/null || echo 0) ))
+        USE_CACHE=true
+    else
+        error_state "Token expired" "Open Claude Code to refresh"
     fi
 fi
 
@@ -269,14 +208,7 @@ if [ "$USE_CACHE" = false ]; then
                 error_state "Rate limited" "Try again in a few minutes"
             fi
         elif [ "$ERROR_TYPE" = "authentication_error" ]; then
-            if auto_refresh_token; then
-                USAGE_JSON=$(curl -s --max-time 10 "$API_URL" \
-                    -H "Authorization: Bearer $TOKEN" \
-                    -H "anthropic-beta: $API_BETA" \
-                    -H "Content-Type: application/json" \
-                    -H "Accept: application/json" \
-                    2>/dev/null)
-            fi
+            TOKEN_STALE=true
         fi
 
         # Still have an error after handling? Fall back to cache or error out
@@ -286,6 +218,8 @@ if [ "$USE_CACHE" = false ]; then
                 USAGE_JSON=$(cat "$CACHE_FILE")
                 CACHE_AGE=$(( $(date +%s) - $(stat -f "%m" "$CACHE_FILE" 2>/dev/null || echo 0) ))
                 USE_CACHE=true
+            elif [ "$TOKEN_STALE" = true ]; then
+                error_state "Token expired" "Open Claude Code to refresh"
             else
                 error_state "API Error" "$ERROR_MSG"
             fi
@@ -412,6 +346,9 @@ case "$RATE_TIER" in
 esac
 printf 'CLAUDE PULSE · %s | size=12 color=%s\n' "$SUB_LABEL" "$WHITE"
 printf 'Updated %s | size=10 color=%s\n' "$UPDATED" "$FAINT"
+if [ "$TOKEN_STALE" = true ]; then
+    printf 'Token expired · open Claude Code to refresh | size=10 color=%s\n' "$YELLOW"
+fi
 
 # One row per limit: label + bar + percentage, then reset line
 while IFS=$'\t' read -r label pct reset; do

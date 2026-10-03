@@ -81,7 +81,7 @@ Removes the symlink from the SwiftBar plugins directory. Does not touch SwiftBar
 3. Caches the response for 60 seconds
 4. Formats the data as a SwiftBar menu bar plugin
 5. Auto-refreshes every 5 minutes
-6. Auto-refreshes the OAuth token when it expires (~every 8 hours)
+6. Never refreshes the token or writes to the Keychain. Claude Code owns its login; if the token has expired, the menu shows the last known numbers and asks you to open Claude Code
 
 No tokens are stored outside of macOS Keychain. No data is sent anywhere except Anthropic’s API.
 
@@ -95,20 +95,6 @@ GET https://api.anthropic.com/api/oauth/usage
 Authorization: Bearer <access_token>
 anthropic-beta: oauth-2025-04-20
 ```
-
-**Token refresh:**
-```
-POST https://console.anthropic.com/v1/oauth/token
-Content-Type: application/json
-
-{
-  "grant_type": "refresh_token",
-  "refresh_token": "<refresh_token>",
-  "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-}
-```
-
-The `client_id` is Claude Code’s official OAuth client ID.
 
 > **These endpoints are undocumented and may change without notice.** If the API changes, the script will show an error state in the menu bar. Check this repo for updates.
 
@@ -145,7 +131,7 @@ claude-pulse-mac/
 Make sure Claude Code is installed and you’re logged in: `claude login`
 
 **"Token expired" persists**
-The auto-refresh may have hit a rate limit. Run `claude login` in terminal to get a fresh token manually. After that, auto-refresh handles future expirations.
+The access token expires every ~8 hours and only Claude Code refreshes it. Open Claude Code (or run `claude`) and the next refresh picks up the new token.
 
 **Menu bar shows nothing**
 Make sure SwiftBar is running and its plugins directory matches where the symlink was created. Check `~/Library/Application Support/SwiftBar/plugins/`.
